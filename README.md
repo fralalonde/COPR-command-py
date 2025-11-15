@@ -3,6 +3,9 @@
 > This Tool is not made or supported by the Fedora Project,
 but aims to reproduce the `dnf copr` functionalities for easily adding COPRs on Fedora Atomic Desktops, IoT and CoreOS.
 
+> [!NOTE2]
+> This is a fork & Python rewrite of the [original bash script](https://github.com/boredsquirrel/COPR-command) that had bugs. It's simpler to use Python than to fight bash.
+
 It does most actions rootless (unlike `dnf copr`) and only requires privilege escalation using `run0` for writing or changing the repo file. Thus it also works without `sudo`.
 
 The tool also fixes SELinux contexts and filesystem permissions, to secure the repo files from tampering. Atomic Desktops allow unprivileged updates from existing repos, so this is important.
