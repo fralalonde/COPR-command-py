@@ -1,216 +1,225 @@
 #!/usr/bin/env python3
 import sys
 import subprocess
-import shutil
 import os
-from pathlib import Path
 import urllib.request
-
-# ----- constants -----
-
-HELP_TEXT = r"""
-====== Experimental COPR Command in non-DNF Fedora Distributions ======
-
-This Tool is not made or supported by the Fedora Project,
-but aims to reproduce the "dnf copr" functionalities for easily adding COPRs.
-
-Usage: copr [OPTION] [ARGUMENT]
-
-Options:
-  enable    Add COPR repository
-  disable   Keep a repo but disable it
-  remove    Remove COPR repository after backing it up
-  list      List all COPR repositories in your repo folder
-  search    Search for a COPR repository by name (in your Browser)
-  help      Display this help text
-
-Argument:
-  Name of the COPR repository (for search) or "author/repo" (for install and remove)
-
-Examples:
-  copr enable kdesig/kde-nightly-qt6
-  copr remove kdesig/kde-nightly-qt6
-  copr list
-  copr search bubblejail
-"""
-
-WARNING_QUESTION = """
-Enabling a Copr repository. Please note that this repository is not part
-of the main distribution, and quality may vary.
-
-The Fedora Project does not exercise any power over the contents of
-this repository beyond the rules outlined in the Copr FAQ at
-<https://docs.pagure.org/copr.copr/user_documentation.html#what-i-can-build-in-copr>,
-and packages are not held to any quality or security level.
-
-Please do not file bug reports about these packages in Fedora
-Bugzilla. In case of problems, contact the owner of this repository.
-
-Do you really want to enable copr.fedorainfracloud.org/{author}/{repo}? [y/N]:
-"""
+from pathlib import Path
 
 REPO_DIR = Path("/etc/yum.repos.d")
 BACKUP_DIR = Path.home() / "COPR"
 
+HELP_TEXT = r"""
+====== Experimental COPR Command in non-DNF Fedora Distributions ======
 
-# ----- helpers -----
+Usage: copr [enable|disable|remove|list|search|help] [repo or author/repo]
+
+Examples:
+  copr enable kdesig/kde-nightly-qt6
+  copr remove _copr_patrickl-wine-tkg
+  copr remove patrickl-wine-tkg
+  copr remove bazzite-org/bazzite
+"""
+
+WARNING_QUESTION = """
+Enabling a Copr repository.
+
+Do you really want to enable copr.fedorainfracloud.org/{author}/{repo}? [y/N]:
+"""
 
 def run0(*cmd):
-    """Wrapper for run0-like privileged commands."""
     return subprocess.run(["run0", *cmd], check=False)
-
 
 def die(msg):
     print(msg)
     sys.exit(1)
 
-
 def secure_files():
-    print("Securing the repo files against manipulation. Please enter your password one last time.")
+    print("Securing repo files...")
     rc = run0("sh", "-c",
               "chown root:root /etc/yum.repos.d/* && "
               "chmod 744 /etc/yum.repos.d/* && "
               "chcon -R system_u:object_r:system_conf_t:s0 /etc/yum.repos.d/")
     if rc.returncode != 0:
-        die("Failed to secure the repo files!")
+        die("Failed to secure repo files!")
 
-
-def backup_and_remove(repo_file: Path, author: str, repo: str):
+def backup_and_remove(path: Path):
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    backup_path = BACKUP_DIR / f"_copr_{author}-{repo}.repo"
-
+    dest = BACKUP_DIR / path.name
     rc = run0("sh", "-c",
-              f"mv '{repo_file}' '{backup_path}' && "
-              f"chown '{os.environ['USER']}' '{backup_path}'")
+              f"mv '{path}' '{dest}' && chown '{os.environ['USER']}' '{dest}'")
     if rc.returncode == 0:
-        print(f"COPR Repository '{repo}' removed.")
+        print(f"Removed and backed up: {path.name}")
     else:
-        print("ERROR removing COPR repository.")
-
+        die("Failed to remove repository.")
 
 def get_releasever():
-    # rpm -E %fedora
     return subprocess.check_output(["rpm", "-E", "%fedora"], text=True).strip()
 
-
-# ----- commands -----
-
+# ------------------------------------------------------------
+# ENABLE
+# ------------------------------------------------------------
 def cmd_enable(author, repo):
-    q = WARNING_QUESTION.format(author=author, repo=repo)
-    ans = input(q).strip().lower()
+    ans = input(WARNING_QUESTION.format(author=author, repo=repo)).strip().lower()
     if ans not in ("y", "yes"):
-        print("Unknown option, exiting.")
+        print("Cancelled.")
         return
 
     fname = REPO_DIR / f"_copr_{author}-{repo}.repo"
-
     if fname.exists():
         run0("sed", "-i", "s/enabled=0/enabled=1/g", str(fname))
-        print(f"Repository {author}/{repo} enabled")
+        print("Repository enabled.")
         return
 
-    release = get_releasever()
-    url = f"https://copr.fedorainfracloud.org/coprs/{author}/{repo}/repo/fedora-{release}/{author}-{repo}-fedora.repo"
+    rel = get_releasever()
+    url = f"https://copr.fedorainfracloud.org/coprs/{author}/{repo}/repo/fedora-{rel}/{author}-{repo}-fedora.repo"
+    print("Downloading:", url)
 
-    print(f"downloading repo '{repo}' from '{author}' for Fedora '{release}'...")
     try:
-        with urllib.request.urlopen(url) as resp:
-            content = resp.read()
-    except Exception:
-        die(f"Could not download repo file from {url}")
+        content = urllib.request.urlopen(url).read()
+    except Exception as e:
+        die(f"Download failed: {e}")
 
-    tmp = Path("/tmp") / f"{author}-{repo}.repo"
-    tmp.write_bytes(content)
+    # write file via run0 tee (for root)
+    p = subprocess.Popen(["run0", "tee", str(fname)], stdin=subprocess.PIPE)
+    p.communicate(content)
+    if p.returncode != 0:
+        die("Failed to install repo file.")
 
-    run0("tee", str(fname), input=content)
     secure_files()
 
-
+# ------------------------------------------------------------
+# DISABLE
+# ------------------------------------------------------------
 def cmd_disable(author, repo):
     fname = REPO_DIR / f"_copr_{author}-{repo}.repo"
     if not fname.exists():
-        die("Already disabled or repo not found.")
-    subprocess.run(["sed", "-i", "s/enabled=1/enabled=0/g", str(fname)])
-    print(f"Repository {author}/{repo} disabled.")
+        die("Repo not found.")
+    run0("sed", "-i", "s/enabled=1/enabled=0/g", str(fname))
+    print("Repository disabled.")
 
+# ------------------------------------------------------------
+# REMOVE
+# ------------------------------------------------------------
 
-def cmd_remove(author, repo):
-    fname = REPO_DIR / f"_copr_{author}-{repo}.repo"
+def find_repo_files(query: str):
+    """Return matching repo files by filename OR content."""
+    query_lower = query.lower()
+    matches = []
 
-    if fname.exists():
-        backup_and_remove(fname, author, repo)
-        return
+    for path in REPO_DIR.glob("*.repo"):
+        # check filename
+        if query_lower in path.name.lower():
+            matches.append(path)
+            continue
+        # fallback: check content
+        try:
+            if query_lower in path.read_text().lower():
+                matches.append(path)
+        except Exception:
+            pass
 
-    # fallback: search by repo name
-    print(f"Repo '{author}/{repo}' not found, trying a search...")
-    matches = [p for p in REPO_DIR.glob("*.repo") if repo in p.read_text()]
+    return matches
+
+def cmd_remove(author, repo_name):
+    # CASE 1: author/repo format
+    if author:
+        path = REPO_DIR / f"_copr_{author}-{repo_name}.repo"
+        if path.exists():
+            backup_and_remove(path)
+            return
+
+    # CASE 2: raw repo name or filename-like name
+    matches = find_repo_files(repo_name)
 
     if not matches:
-        die(f'No repositories containing "{repo}" were found.')
+        die(f"No repositories matching '{repo_name}' found.")
 
-    match = matches[0]
-    ans = input(f'Repo "{match}" was found. Do you want to backup and remove this repo? (y/N) ').strip().lower()
-    if ans == "y":
-        backup_and_remove(match, author, repo)
-    else:
-        sys.exit(1)
+    if len(matches) == 1:
+        path = matches[0]
+        ans = input(f"Remove '{path.name}'? (y/N): ").strip().lower()
+        if ans == "y":
+            backup_and_remove(path)
+        else:
+            print("Cancelled.")
+        return
 
+    print("Multiple matches found:")
+    for i, m in enumerate(matches):
+        print(f"  {i+1}) {m.name}")
 
+    sel = input("Choose number to remove (or N to cancel): ").strip().lower()
+    if not sel.isdigit():
+        print("Cancelled.")
+        return
+
+    idx = int(sel) - 1
+    if idx < 0 or idx >= len(matches):
+        print("Invalid selection.")
+        return
+
+    backup_and_remove(matches[idx])
+
+# ------------------------------------------------------------
+# LIST
+# ------------------------------------------------------------
 def cmd_list():
-    for p in REPO_DIR.glob("_copr*.repo"):
-        print(p.name.replace("_copr_", "").replace(".repo", ""))
+    for p in REPO_DIR.glob("*.repo"):
+        print(p.stem)
 
-
+# ------------------------------------------------------------
+# SEARCH
+# ------------------------------------------------------------
 def cmd_search(term):
     url = f"https://copr.fedorainfracloud.org/coprs/fulltext/?fulltext={term}"
     subprocess.Popen(["xdg-open", url])
 
-
-# ----- main -----
-
+# ------------------------------------------------------------
+# MAIN
+# ------------------------------------------------------------
 def main():
     if len(sys.argv) < 2:
         print(HELP_TEXT)
         return
 
-    action = sys.argv[1]
+    cmd = sys.argv[1]
 
-    if action in ("help", "-h", "--help", "-help", "--h"):
+    if cmd in ("help", "-h", "--help"):
         print(HELP_TEXT)
         return
 
-    if action == "list":
+    if cmd == "list":
         cmd_list()
         return
 
-    # everything else requires a second arg
     if len(sys.argv) < 3:
         print(HELP_TEXT)
         return
 
     arg = sys.argv[2]
+
     if "/" in arg:
         author, repo = arg.split("/", 1)
     else:
-        author, repo = None, None
+        author, repo = None, arg
 
-    if action == "enable":
-        if not author or not repo:
-            die("Format must be author/repo")
+    if cmd == "enable":
+        if not author:
+            die("enable requires author/repo")
         cmd_enable(author, repo)
-    elif action == "disable":
-        if not author or not repo:
-            die("Format must be author/repo")
+
+    elif cmd == "disable":
+        if not author:
+            die("disable requires author/repo")
         cmd_disable(author, repo)
-    elif action == "remove":
-        if not author or not repo:
-            die("Format must be author/repo")
+
+    elif cmd == "remove":
         cmd_remove(author, repo)
-    elif action == "search":
+
+    elif cmd == "search":
         cmd_search(arg)
+
     else:
         print(HELP_TEXT)
-
 
 if __name__ == "__main__":
     main()
